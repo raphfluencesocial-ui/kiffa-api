@@ -38,7 +38,7 @@ import time
 
 # Imports modules Kiffa
 from anti_fraude import executer_anti_fraude
-from scoring import calculer_score_final
+from scoring import calculer_score_final, calculer_score_complet
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -162,6 +162,24 @@ class PayloadScoring(BaseModel):
         description="Liste des transactions Mobile Money",
         min_items=5,
         max_items=10_000
+    )
+    annees_activite: Optional[float] = Field(
+        default=0,
+        description="Années d'activité du commerce",
+        ge=0,
+        le=100
+    )
+    adresse_commerce: Optional[str] = Field(
+        default="",
+        description="Adresse physique du commerce"
+    )
+    gps_lat: Optional[float] = Field(
+        default=None,
+        description="Latitude GPS du commerce"
+    )
+    gps_lng: Optional[float] = Field(
+        default=None,
+        description="Longitude GPS du commerce"
     )
     type_profil: Optional[str] = Field(
         default="COMMERCANT",
@@ -323,10 +341,16 @@ async def calculer_score(payload: PayloadScoring):
             )
         
         # ── ÉTAPE 3 : Calcul du Score ──
-        resultat_scoring = calculer_score_final(
-            transactions=transactions_propres,
-            malus_concentration=malus
-        )
+        resultat_scoring = calculer_score_complet(
+    transactions=transactions_propres,
+    malus_concentration=malus,
+    annees_activite=payload.annees_activite,
+    adresse=payload.adresse_commerce or "",
+    gps_lat=payload.gps_lat,
+    gps_lng=payload.gps_lng)
+            
+
+       
         
         # ── ÉTAPE 4 : Construction de la réponse ──
         reponse = {
