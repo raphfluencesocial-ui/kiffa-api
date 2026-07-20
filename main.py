@@ -38,7 +38,7 @@ import time
 
 # Imports modules Kiffa
 from anti_fraude import executer_anti_fraude
-from scoring import calculer_score_final, calculer_score_complet
+from scoring import calculer_score_final, calculer_score_complet, calculer_capacite_remboursement
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -180,6 +180,22 @@ class PayloadScoring(BaseModel):
     gps_lng: Optional[float] = Field(
         default=None,
         description="Longitude GPS du commerce"
+    )
+    montant_demande: Optional[float] = Field(
+    
+        default=0,
+        description="Montant en FCFA demandé par le commerçant",
+        ge=0
+    )
+    duree_souhaitee_mois: Optional[int] = Field(
+        default=1,
+        description="Durée de remboursement souhaitée en mois",
+        ge=1,
+        le=36
+    )
+    credits_en_cours: Optional[bool] = Field(
+        default=False,
+        description="Déclaration du commerçant : a-t-il un crédit en cours ailleurs (donnée non vérifiable)"
     )
     type_profil: Optional[str] = Field(
         default="COMMERCANT",
@@ -348,7 +364,13 @@ async def calculer_score(payload: PayloadScoring):
     adresse=payload.adresse_commerce or "",
     gps_lat=payload.gps_lat,
     gps_lng=payload.gps_lng)
-            
+     # ── ÉTAPE 3bis : Calcul de la capacité de remboursement ──
+        resultat_capacite = calculer_capacite_remboursement(
+            transactions=transactions_propres,
+            montant_demande=payload.montant_demande or 0,
+            duree_souhaitee_mois=payload.duree_souhaitee_mois or 1,
+            credits_en_cours=payload.credits_en_cours or False
+        )       
 
        
         
@@ -407,9 +429,17 @@ async def calculer_score(payload: PayloadScoring):
                 "malus_concentration_applique": malus > 0,
                 "paires_transit_detectees": resultat_fraude[
                     'rapport_velocite'
-                ].get('paires_transit_detectees', 0)
-            },
-            
+                ].get('paires_transit_detectees', 0),
+                "incoherences_soldes_detectees": resultat_fraude[
+                    'rapport_coherence'
+                ].get('incoherences_detectees', 0),
+                "taux_coherence_soldes_pourcentage": resultat_fraude[
+                    'rapport_coherence'
+                ].get('taux_coherence_pourcentage', 100.0)
+            },            
+
+            # Capacité de remboursement
+            "capacite_remboursement": resultat_capacite, 
             # Mention légale
             "mention_legale": (
                 "Ce score est généré automatiquement à titre indicatif. "

@@ -289,6 +289,99 @@ def filtre_concentration(
 # les transactions nettoyées + le rapport complet
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+# FILTRE 3 — COHÉRENCE MATHÉMATIQUE DES SOLDES
+# Vérifie que balance_after suit la logique comptable :
+# solde_N doit être proche de solde_N-1 + entrée - sortie.
+# Un écart important signale un solde falsifié (montants modifiés
+# sans recalcul en cascade — signature typique d'un PDF trafiqué).
+# Seuil : ±500 FCFA (absolu, pas relatif — les écritures Mobile
+# Money sont arrondies, un seuil en pourcentage génère trop de
+# faux positifs sur les petits montants).
+# ═══════════════════════════════════════════════════════════════
+
+def filtre_coherence_soldes(transactions: List[Dict], tolerance_fcfa: int = 500) -> Dict[str, Any]:
+    """
+    Vérifie la cohérence comptable des soldes déclarés.
+
+    Args:
+        transactions: Liste brute des transactions
+        tolerance_fcfa: Écart absolu toléré en FCFA (défaut : 500)
+
+    Returns:
+        Dict avec le statut, le nombre d'incohérences et le détail.
+
+    Limite connue : ce filtre suppose que les transactions fournies
+    représentent l'intégralité de l'activité du compte sur la période.
+    S'il manque des transactions dans le relevé transmis (période
+    partielle, export incomplet), des faux positifs sont possibles.
+    """
+
+    try:
+        transactions_triees = sorted(
+            transactions,
+            key=lambda t: _parser_timestamp(t['timestamp'])
+        )
+    except Exception as e:
+        return {
+            "filtre": "coherence_soldes",
+            "statut": "ERREUR",
+            "message": f"Erreur tri : {str(e)}",
+            "incoherences_detectees": 0,
+            "taux_coherence": None
+        }
+
+    incoherences = []
+    nb_verifiables = 0
+
+    for i in range(1, len(transactions_triees)):
+        precedente = transactions_triees[i - 1]
+        courante = transactions_triees[i]
+
+        solde_precedent = precedente.get('balance_after')
+        solde_courant = courante.get('balance_after')
+
+        if solde_precedent is None or solde_courant is None:
+            continue
+
+        montant = courante.get('amount', 0)
+        if courante.get('type') == 'IN':
+            solde_attendu = solde_precedent + montant
+        else:
+            solde_attendu = solde_precedent - montant
+
+        nb_verifiables += 1
+        ecart = abs(solde_courant - solde_attendu)
+
+        if ecart > tolerance_fcfa:
+            incoherences.append({
+                "transaction_id": courante.get('transaction_id', 'INCONNU'),
+                "solde_attendu": solde_attendu,
+                "solde_declare": solde_courant,
+                "ecart_fcfa": ecart
+            })
+
+    taux_coherence = 100.0
+    if nb_verifiables > 0:
+        taux_coherence = round(100 * (1 - len(incoherences) / nb_verifiables), 1)
+
+    statut = "OK" if len(incoherences) == 0 else "ALERTE"
+
+    return {
+        "filtre": "coherence_soldes",
+        "statut": statut,
+        "transactions_verifiables": nb_verifiables,
+        "incoherences_detectees": len(incoherences),
+        "taux_coherence_pourcentage": taux_coherence,
+        "detail_incoherences": incoherences[:10],  # limite d'affichage
+        "message": (
+            f"{len(incoherences)} incohérence(s) de solde détectée(s) sur "
+            f"{nb_verifiables} transactions vérifiables — "
+            f"taux de cohérence {taux_coherence}%"
+        )
+    }
+
+
 def executer_anti_fraude(transactions: List[Dict]) -> Dict[str, Any]:
     """
     Point d'entrée principal du module anti-fraude.
@@ -318,7 +411,9 @@ def executer_anti_fraude(transactions: List[Dict]) -> Dict[str, Any]:
     # ── ÉTAPE 2 : Filtre Concentration ──
     malus, rapport_concentration = filtre_concentration(transactions_nettoyees)
     print(f"[ANTI-FRAUDE] Concentration : {rapport_concentration['message']}")
-    
+    # ── ÉTAPE 3 : Filtre Cohérence des Soldes ──
+    rapport_coherence = filtre_coherence_soldes(transactions_nettoyees)
+    print(f"[ANTI-FRAUDE] Cohérence soldes : {rapport_coherence['message']}")
     # ── CALCUL DU SCORE DE CONFIANCE ANTI-FRAUDE ──
     score_confiance = 100
     
@@ -327,13 +422,17 @@ def executer_anti_fraude(transactions: List[Dict]) -> Dict[str, Any]:
     if nb_transit > 0:
         penalite_transit = min(30, nb_transit * 10)
         score_confiance -= penalite_transit
-    
     # Pénalité pour concentration
     if malus > 0:
         score_confiance -= 40
-    
+
+    # Pénalité pour incohérence des soldes
+    nb_incoherences = rapport_coherence.get('incoherences_detectees', 0)
+    if nb_incoherences > 0:
+        penalite_coherence = min(35, nb_incoherences * 8)
+        score_confiance -= penalite_coherence
+
     score_confiance = max(0, score_confiance)
-    
     # Statut global
     if score_confiance >= 80:
         statut_global = "✅ PROPRE"
@@ -341,19 +440,18 @@ def executer_anti_fraude(transactions: List[Dict]) -> Dict[str, Any]:
         statut_global = "⚠️ SUSPECT — Vérification recommandée"
     else:
         statut_global = "🚨 REJETÉ — Fraude probable"
-    
+
     resultat = {
-        "transactions_nettoyees": transactions_nettoyees,
-        "malus_concentration": malus,
-        "rapport_velocite": rapport_velocite,
-        "rapport_concentration": rapport_concentration,
-        "score_confiance_anti_fraude": score_confiance,
-        "statut_global": statut_global,
-        "nb_transactions_initiales": len(transactions),
-        "nb_transactions_analysees": len(transactions_nettoyees)
-    }
-    
-    # Purge mémoire
+    "transactions_nettoyees": transactions_nettoyees,
+    "malus_concentration": malus,
+    "rapport_velocite": rapport_velocite,
+    "rapport_concentration": rapport_concentration,
+    "rapport_coherence": rapport_coherence,
+    "score_confiance_anti_fraude": score_confiance,
+    "statut_global": statut_global,
+    "nb_transactions_initiales": len(transactions),
+    "nb_transactions_analysees": len(transactions_nettoyees)
+}     # Purge mémoire
     del transactions
     gc.collect()
     

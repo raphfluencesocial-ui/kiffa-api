@@ -24,7 +24,7 @@ from typing import List, Dict, Any
 from datetime import datetime, date
 from collections import defaultdict
 import gc
-
+import math
 
 # ═══════════════════════════════════════════════════════════════
 # PILIER 1 — CONSISTANCE (Cf) — 40 POINTS
@@ -679,4 +679,127 @@ def calculer_score_complet(
             "reseau_fournisseurs": reseau,
             "localisation": localisation
         }
+    }# ═══════════════════════════════════════════════════════════════
+# CAPACITÉ DE REMBOURSEMENT
+# Calcule si le montant demandé est réaliste par rapport à
+# l'excédent de trésorerie réel du commerçant.
+# Règle : 30% de l'excédent mensuel max alloué au remboursement
+# (seuil standard microfinance — évite le surendettement).
+# ═══════════════════════════════════════════════════════════════
+
+def calculer_capacite_remboursement(
+    transactions: List[Dict],
+    montant_demande: float = 0,
+    duree_souhaitee_mois: int = 1,
+    credits_en_cours: bool = False
+) -> Dict[str, Any]:
+    """
+    Évalue la faisabilité du remboursement du montant demandé.
+
+    Args:
+        transactions: Transactions nettoyées par l'anti-fraude
+        montant_demande: Montant en FCFA demandé par le commerçant
+        duree_souhaitee_mois: Durée de remboursement souhaitée
+        credits_en_cours: Déclaration du commerçant — a-t-il déjà un crédit ailleurs
+
+    Returns:
+        Dict avec l'excédent mensuel, la capacité de remboursement,
+        la durée recommandée, et un avis de faisabilité.
+
+    IMPORTANT : credits_en_cours est une donnée AUTO-DÉCLARATIVE.
+    Le système ne peut pas vérifier son exactitude sans accès à un
+    bureau de crédit externe. Si False, cela signifie "non déclaré",
+    pas "vérifié absent". L'IMF doit le savoir.
+    """
+
+    entrees = [t for t in transactions if t['type'] == 'IN']
+    sorties = [t for t in transactions if t['type'] == 'OUT']
+
+    # Nombre de mois couverts par les transactions
+    mois_uniques = set()
+    for t in transactions:
+        try:
+            if isinstance(t['timestamp'], str):
+                dt = datetime.fromisoformat(t['timestamp'].replace('Z', '+00:00'))
+            else:
+                dt = t['timestamp']
+            mois_uniques.add((dt.year, dt.month))
+        except (ValueError, KeyError):
+            continue
+    nb_mois = max(1, len(mois_uniques))
+
+    total_entrees = sum(t['amount'] for t in entrees)
+    total_sorties = sum(t['amount'] for t in sorties)
+
+    entrees_mensuelles = total_entrees / nb_mois
+    sorties_mensuelles = total_sorties / nb_mois
+    excedent_mensuel = entrees_mensuelles - sorties_mensuelles
+
+    # Seuil standard microfinance : 30% max de l'excédent en remboursement
+    TAUX_ALLOCATION_MAX = 0.30
+    capacite_remboursement_mensuelle = max(0, excedent_mensuel * TAUX_ALLOCATION_MAX)
+
+    # Malus si crédit en cours déclaré — réduit la capacité réelle disponible
+    malus_credit_existant = 0.0
+    if credits_en_cours:
+        malus_credit_existant = 0.4  # réduit la capacité de 40%
+        capacite_remboursement_mensuelle *= (1 - malus_credit_existant)
+
+    if montant_demande <= 0:
+        return {
+            "excedent_mensuel_fcfa": round(excedent_mensuel),
+            "capacite_remboursement_mensuelle_fcfa": round(capacite_remboursement_mensuelle),
+            "credits_en_cours_declares": credits_en_cours,
+            "avertissement": "Donnée credits_en_cours non vérifiable — déclaration du commerçant uniquement",
+            "faisabilite": "NON_EVALUE",
+            "message": "Aucun montant demandé — capacité de remboursement calculée à titre indicatif uniquement"
+        }
+
+    if capacite_remboursement_mensuelle <= 0:
+        return {
+            "excedent_mensuel_fcfa": round(excedent_mensuel),
+            "capacite_remboursement_mensuelle_fcfa": 0,
+            "montant_demande_fcfa": montant_demande,
+            "duree_souhaitee_mois": duree_souhaitee_mois,
+            "credits_en_cours_declares": credits_en_cours,
+            "avertissement": "Donnée credits_en_cours non vérifiable — déclaration du commerçant uniquement",
+            "faisabilite": "NON_RECOMMANDE",
+            "message": "Excédent de trésorerie insuffisant ou nul — le commerçant ne dégage pas de marge de remboursement actuellement"
+        }
+
+    duree_reelle_necessaire = math.ceil(montant_demande / capacite_remboursement_mensuelle)
+
+    if duree_reelle_necessaire <= duree_souhaitee_mois:
+        faisabilite = "FAISABLE"
+        message = (
+            f"Le commerçant peut rembourser {montant_demande:,.0f} FCFA "
+            f"en {duree_reelle_necessaire} mois avec sa capacité actuelle — "
+            f"compatible avec la durée souhaitée de {duree_souhaitee_mois} mois"
+        )
+    elif duree_reelle_necessaire <= duree_souhaitee_mois * 1.5:
+        faisabilite = "FAISABLE_AVEC_AJUSTEMENT"
+        message = (
+            f"Le montant demandé nécessite {duree_reelle_necessaire} mois de remboursement "
+            f"contre {duree_souhaitee_mois} mois souhaités — proposer un allongement de durée "
+            f"ou une réduction du montant"
+        )
+    else:
+        faisabilite = "RISQUE_ELEVE"
+        message = (
+            f"Le montant demandé nécessiterait {duree_reelle_necessaire} mois de remboursement — "
+            f"largement supérieur aux {duree_souhaitee_mois} mois souhaités. "
+            f"Risque de surendettement si accordé tel quel."
+        )
+
+    return {
+        "excedent_mensuel_fcfa": round(excedent_mensuel),
+        "capacite_remboursement_mensuelle_fcfa": round(capacite_remboursement_mensuelle),
+        "montant_demande_fcfa": montant_demande,
+        "duree_souhaitee_mois": duree_souhaitee_mois,
+        "duree_reelle_necessaire_mois": duree_reelle_necessaire,
+        "malus_credit_existant_applique": malus_credit_existant > 0,
+        "credits_en_cours_declares": credits_en_cours,
+        "avertissement": "Donnée credits_en_cours non vérifiable — déclaration du commerçant uniquement",
+        "faisabilite": faisabilite,
+        "message": message
     }
